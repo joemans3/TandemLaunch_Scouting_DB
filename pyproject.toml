@@ -1,5 +1,5 @@
 [project]
-name = "scouting-database-client"
+name = "TLScouting"
 dynamic = ["version"]
 description = "Scouting Database for TandemLaunch's Active Recruitment"
 readme = "README.md"
