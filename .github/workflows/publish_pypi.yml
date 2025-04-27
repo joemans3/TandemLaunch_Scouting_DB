@@ -1,0 +1,47 @@
+name: Publish Client on Tag
+
+on:
+  push:
+    tags:
+      - "*"  # Trigger on any tag
+
+permissions:
+  contents: write  # For uploading artifacts to GitHub Releases
+  id-token: write  # For trusted PyPI publishing (OIDC)
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hatch using uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv pip install hatch
+
+      - name: Build the Distribution
+        run: |
+          hatch build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+
