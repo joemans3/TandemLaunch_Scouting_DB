@@ -24,7 +24,7 @@ jobs:
 
       - name: Build Client Distribution
         run: |
-          uv pip install hatch
+          uv pip install --system hatch
           hatch build
 
       - name: Store the distribution packages
