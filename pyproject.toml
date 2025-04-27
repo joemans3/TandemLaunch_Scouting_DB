@@ -1,16 +1,41 @@
 [project]
-name = "scouting-database"
-version = "0.1.0"
+name = "scouting-database-client"
+dynamic = ["version"]
 description = "Scouting Database for TandemLaunch's Active Recruitment"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "email-validator>=2.2.0",
-    "fastapi>=0.115.12",
-    "pydantic>=2.11.3",
+    "platformdirs>=4.3.7",
     "pyqt6>=6.9.0",
     "requests>=2.32.3",
     "tomli>=2.2.1",
     "tomli-w>=1.2.0",
-    "uvicorn>=0.34.2",
 ]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.115.0", "uvicorn>=0.34.0", "pydantic[email]>=2.11.0"]
+
+[project.scripts]
+scouting-client = "client.launcher:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "client/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+include = ["client"]
+
+[tool.hatch.build.targets.sdist]
+include = ["client"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.envs.default]
+dependencies = ["hatch"]
+
+[tool.hatch.envs.dev]
+dependencies = ["hatch", "scouting-database-client[server]"]

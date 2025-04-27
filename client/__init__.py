@@ -1,2 +1,3 @@
-from .api import search_catalog
 from .main import ClientApp
+
+__version__ = "0.1.0"

@@ -1,13 +1,11 @@
-import sys
-from pathlib import Path
+import csv
 
-import tomli
-import tomli_w
+import requests
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QApplication,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -20,19 +18,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .api import (
-    add_admin,
-    add_department,
-    add_department_head,
-    add_university,
-    delete_admin,
-    delete_department_head,
+    create_catalog_entry,
+    delete_catalog_entry,
     ping_server,
-    search_catalog,
-    update_admin,
-    update_department,
-    update_department_head,
-    update_university,
+    search_catalog_entries,
+    update_catalog_entry,
 )
+from .settings import load_settings, save_settings
 
 
 class SettingsDialog(QDialog):
@@ -42,11 +34,8 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout()
 
-        # 🔵 Load current settings safely
-        SETTINGS_FILE = Path(__file__).parent.parent / "settings.toml"
+        settings = load_settings()
         try:
-            with open(SETTINGS_FILE, "rb") as f:
-                settings = tomli.load(f)
             current_host = settings["server"]["host"]
             current_port = str(settings["server"]["port"])
         except Exception:
@@ -84,6 +73,9 @@ class SettingsDialog(QDialog):
 class ClientApp(QWidget):
     def __init__(self):
         super().__init__()
+
+        self.current_page = 0
+        self.entries_per_page = 50  # can be 50, 100, etc
         self.init_ui()
 
     def init_ui(self):
@@ -98,6 +90,9 @@ class ClientApp(QWidget):
         self.search_input.setPlaceholderText(
             "Search for university, department, head, admin..."
         )
+
+        self.search_input.textChanged.connect(self.handle_search_input_change)
+
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self.perform_search)
         search_layout.addWidget(QLabel("Search:"))
@@ -119,6 +114,36 @@ class ClientApp(QWidget):
         )
 
         self.results_table.itemSelectionChanged.connect(self.update_delete_button_state)
+
+        self.results_table.setSortingEnabled(True)
+
+        # Pagination controls
+        self.arrow_widget = QWidget()
+        arrow_layout = QHBoxLayout()
+        arrow_layout.setContentsMargins(0, 0, 0, 0)
+        arrow_layout.setSpacing(5)  # small gap between arrows
+        self.prev_button = QPushButton("⟵")
+        self.prev_button.setFixedSize(25, 25)
+        self.prev_button.clicked.connect(self.go_to_previous_page)
+        self.page_label = QLabel("1")
+        self.page_label.setFixedWidth(20)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.next_button = QPushButton("⟶")
+        self.next_button.setFixedSize(25, 25)
+        self.next_button.clicked.connect(self.go_to_next_page)
+        arrow_layout.addWidget(self.prev_button)
+        arrow_layout.addWidget(self.page_label)
+        arrow_layout.addWidget(self.next_button)
+        self.arrow_widget.setLayout(arrow_layout)
+        search_layout.addWidget(
+            self.arrow_widget, alignment=Qt.AlignmentFlag.AlignRight
+        )
+
+        self.search_input.returnPressed.connect(self.perform_search)
+
+        self.export_button = QPushButton("Export to CSV")
+        self.export_button.clicked.connect(self.export_to_csv)
+        search_layout.addWidget(self.export_button)
 
         self.new_entry_button = QPushButton("Create New Entry")
         self.new_entry_button.clicked.connect(self.open_new_entry_dialog)
@@ -153,12 +178,25 @@ class ClientApp(QWidget):
         QTimer.singleShot(500, self.check_connection)
         QTimer.singleShot(600, self.perform_search)
 
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self.perform_search)
+
     def perform_search(self):
         query = self.search_input.text().strip()
 
         try:
-            results = search_catalog(query)
+            offset = self.current_page * self.entries_per_page
+            results = search_catalog_entries(
+                query, offset=offset, limit=self.entries_per_page
+            )
             self.populate_table(results)
+
+            # 🔵 Update pagination buttons
+            self.prev_button.setEnabled(self.current_page > 0)
+            self.next_button.setEnabled(len(results) == self.entries_per_page)
+            self.page_label.setText(f"{self.current_page + 1}")
+
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Error contacting server: {e}")
 
@@ -178,12 +216,7 @@ class ClientApp(QWidget):
                 row_data.get("admin_email", ""),
             ]
 
-            id_fields = {
-                "university_id": row_data.get("university_id"),
-                "department_id": row_data.get("department_id"),
-                "department_head_id": row_data.get("department_head_id"),
-                "admin_id": row_data.get("admin_id"),
-            }
+            id_fields = {"catalog_entry_id": row_data.get("id")}
 
             for column, value in enumerate(fields):
                 item = QTableWidgetItem(value)
@@ -197,7 +230,7 @@ class ClientApp(QWidget):
         if dialog.exec():
             data = dialog.get_data()
 
-            # 🔵 Step 0: Validate fields first
+            # 🔵 Step 0: Validate required fields
             if not data["university_name"]:
                 QMessageBox.warning(
                     self, "Missing Data", "University name is required."
@@ -210,93 +243,32 @@ class ClientApp(QWidget):
                 )
                 return
 
-            if (data["head_name"] and not data["head_email"]) or (
-                data["head_email"] and not data["head_name"]
-            ):
-                QMessageBox.warning(
-                    self,
-                    "Missing Data",
-                    "Both Department Head name and email must be filled, or both left blank.",
+            try:
+                create_catalog_entry(
+                    {
+                        "university_name": data["university_name"],
+                        "department_name": data["department_name"],
+                        "department_head_name": data.get("head_name") or None,
+                        "department_head_email": data.get("head_email") or None,
+                        "admin_name": data.get("admin_name") or None,
+                        "admin_email": data.get("admin_email") or None,
+                    }
                 )
-                return
+                QMessageBox.information(self, "Success", "Entry created successfully!")
+                self.search_input.setText("")
+                self.perform_search()
 
-            if (data["admin_name"] and not data["admin_email"]) or (
-                data["admin_email"] and not data["admin_name"]
-            ):
-                QMessageBox.warning(
-                    self,
-                    "Missing Data",
-                    "Both Admin name and email must be filled, or both left blank.",
-                )
-                return
+            except requests.HTTPError as e:
+                if e.response.status_code == 400:
+                    error_detail = e.response.json().get(
+                        "detail", "Duplicate entry detected."
+                    )
+                    QMessageBox.warning(self, "Duplicate Entry", error_detail)
+                else:
+                    QMessageBox.warning(self, "Error", f"Server error: {e}")
 
-            # 🔵 Step 1: Search if entries already exist
-            existing = search_catalog(data["university_name"])
-            university_exists = any(
-                result.get("university_name", "").lower()
-                == data["university_name"].lower()
-                for result in existing
-            )
-
-            existing_dep = search_catalog(data["department_name"])
-            department_exists = any(
-                result.get("department_name", "").lower()
-                == data["department_name"].lower()
-                for result in existing_dep
-            )
-
-            existing_head = search_catalog(data["head_name"])
-            head_exists = any(
-                result.get("department_head_name", "").lower()
-                == data["head_name"].lower()
-                for result in existing_head
-            )
-
-            existing_admin = search_catalog(data["admin_name"])
-            admin_exists = any(
-                result.get("admin_name", "").lower() == data["admin_name"].lower()
-                for result in existing_admin
-            )
-
-            if university_exists or department_exists or head_exists or admin_exists:
-                QMessageBox.warning(
-                    self,
-                    "Already Exists",
-                    "Some fields already exist. Please check your entries.",
-                )
-                return
-
-            # 🔵 Step 2: Create in order
-            uni_result = add_university(data["university_name"])
-            if not uni_result:
-                QMessageBox.warning(self, "Error", "Failed to add university.")
-                return
-
-            university_id = uni_result["id"]
-
-            dep_result = add_department(data["department_name"], university_id)
-            if not dep_result:
-                QMessageBox.warning(self, "Error", "Failed to add department.")
-                return
-
-            department_id = dep_result["id"]
-
-            if data["head_name"] and data["head_email"]:
-                add_department_head(
-                    data["head_name"], data["head_email"], department_id, university_id
-                )
-
-            if data["admin_name"] and data["admin_email"]:
-                add_admin(
-                    data["admin_name"],
-                    data["admin_email"],
-                    department_id,
-                    university_id,
-                )
-
-            QMessageBox.information(self, "Success", "Entry created successfully!")
-            self.search_input.setText("")
-            self.perform_search()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to create entry: {e}")
 
     def update_delete_button_state(self):
         selected_rows = self.results_table.selectionModel().selectedRows()
@@ -318,35 +290,29 @@ class ClientApp(QWidget):
         item = self.results_table.item(selected_row, 0)
         ids = item.data(Qt.ItemDataRole.UserRole)
 
-        department_head_id = ids.get("department_head_id")
-        admin_id = ids.get("admin_id")
+        entry_id = ids.get("catalog_entry_id")
+
+        if not entry_id:
+            QMessageBox.warning(self, "Error", "Missing catalog entry ID.")
+            return
 
         confirm = QMessageBox.question(
             self,
             "Confirm Deletion",
-            "Are you sure you want to delete the Department Head and Admin for this entry?",
+            "Are you sure you want to delete this catalog entry?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        success = True
-
-        if department_head_id:
-            if not delete_department_head(department_head_id):
-                success = False
-
-        if admin_id:
-            if not delete_admin(admin_id):
-                success = False
-
-        if success:
-            QMessageBox.information(self, "Deleted", "Entry deleted successfully.")
-        else:
-            QMessageBox.warning(
-                self, "Partial Failure", "Some deletions may have failed."
+        try:
+            delete_catalog_entry(entry_id)
+            QMessageBox.information(
+                self, "Deleted", "Catalog entry deleted successfully."
             )
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to delete entry: {e}")
 
         self.perform_search()
 
@@ -356,7 +322,7 @@ class ClientApp(QWidget):
             QMessageBox.warning(self, "No Selection", "Please select an entry to edit.")
             return
 
-        # Extract data
+        # Extract current data
         current_data = {
             "university_name": self.results_table.item(selected_row, 0).text(),
             "department_name": self.results_table.item(selected_row, 1).text(),
@@ -369,47 +335,41 @@ class ClientApp(QWidget):
         item = self.results_table.item(selected_row, 0)
         ids = item.data(Qt.ItemDataRole.UserRole)
 
+        entry_id = ids.get("catalog_entry_id")
+
+        if not entry_id:
+            QMessageBox.warning(self, "Error", "Missing catalog entry ID.")
+            return
+
+        # Open edit dialog
         dialog = EditEntryDialog(current_data, self)
         if dialog.exec():
             new_data = dialog.get_data()
 
-            changes_made = False
-
-            # Check and update fields individually
-            if new_data["university_name"] != current_data["university_name"]:
-                changes_made |= update_university(
-                    ids.get("university_id"), new_data["university_name"]
-                )
-
-            if new_data["department_name"] != current_data["department_name"]:
-                changes_made |= update_department(
-                    ids.get("department_id"), new_data["department_name"]
-                )
-
-            if ids.get("department_head_id") and (
-                new_data["department_head_name"] != current_data["department_head_name"]
-                or new_data["department_head_email"]
-                != current_data["department_head_email"]
-            ):
-                changes_made |= update_department_head(
-                    ids.get("department_head_id"),
-                    new_data["department_head_name"],
-                    new_data["department_head_email"],
-                )
-
-            if ids.get("admin_id") and (
-                new_data["admin_name"] != current_data["admin_name"]
-                or new_data["admin_email"] != current_data["admin_email"]
-            ):
-                changes_made |= update_admin(
-                    ids.get("admin_id"), new_data["admin_name"], new_data["admin_email"]
-                )
-
-            if changes_made:
-                QMessageBox.information(self, "Updated", "Entry updated successfully!")
-                self.perform_search()
-            else:
+            # Check if any field actually changed (optional optimization)
+            if new_data == current_data:
                 QMessageBox.information(self, "No Changes", "No fields were modified.")
+                return
+
+            try:
+                update_catalog_entry(
+                    entry_id,
+                    {
+                        "university_name": new_data["university_name"],
+                        "department_name": new_data["department_name"],
+                        "department_head_name": new_data.get("department_head_name")
+                        or None,
+                        "department_head_email": new_data.get("department_head_email")
+                        or None,
+                        "admin_name": new_data.get("admin_name") or None,
+                        "admin_email": new_data.get("admin_email") or None,
+                    },
+                )
+                QMessageBox.information(self, "Updated", "Entry updated successfully.")
+                self.perform_search()
+
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to update entry: {e}")
 
     def check_connection(self):
         connected = ping_server()
@@ -441,11 +401,7 @@ class ClientApp(QWidget):
         if dialog.exec():
             new_settings = dialog.get_settings()
 
-            # Save to settings.toml
-            SETTINGS_FILE = Path(__file__).parent.parent / "settings.toml"
-
-            with open(SETTINGS_FILE, "wb") as f:
-                tomli_w.dump({"server": new_settings}, f)
+            save_settings({"server": new_settings})
 
             QMessageBox.information(
                 self,
@@ -453,10 +409,78 @@ class ClientApp(QWidget):
                 "Server settings updated. Please restart the application.",
             )
 
+    def handle_search_input_change(self):
+        self._search_timer.stop()
+        self._search_timer.start(400)
+
+    def go_to_previous_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.perform_search()
+
+    def go_to_next_page(self):
+        self.current_page += 1
+        self.perform_search()
+
+    def export_to_csv(self):
+        try:
+            # 🔵 Fetch all entries (no search, no pagination)
+            results = search_catalog_entries(query="", offset=0, limit=1000000)
+
+            if not results:
+                QMessageBox.information(
+                    self, "No Data", "No catalog entries to export."
+                )
+                return
+
+            # 🔵 Ask where to save the CSV file
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Catalog as CSV", "catalog_export.csv", "CSV Files (*.csv)"
+            )
+
+            if not file_path:
+                return  # User cancelled
+
+            # 🔵 Write to CSV
+            with open(file_path, mode="w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(
+                    [
+                        "University",
+                        "Department",
+                        "Department Head",
+                        "Head Email",
+                        "Admin",
+                        "Admin Email",
+                    ]
+                )  # header
+
+                for row in results:
+                    writer.writerow(
+                        [
+                            row.get("university_name", ""),
+                            row.get("department_name", ""),
+                            row.get("department_head_name", ""),
+                            row.get("department_head_email", ""),
+                            row.get("admin_name", ""),
+                            row.get("admin_email", ""),
+                        ]
+                    )
+
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Catalog exported successfully to:\n{file_path}",
+            )
+
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Failed to export catalog: {e}")
+
 
 class EditEntryDialog(QDialog):
     def __init__(self, entry_data, parent=None):
         super().__init__(parent)
+
         self.setWindowTitle("Edit Entry")
 
         layout = QVBoxLayout()
@@ -558,10 +582,3 @@ class NewEntryDialog(QDialog):
             "admin_name": self.admin_name_input.text().strip(),
             "admin_email": self.admin_email_input.text().strip(),
         }
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    client = ClientApp()
-    client.show()
-    sys.exit(app.exec())

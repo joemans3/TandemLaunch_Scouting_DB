@@ -60,6 +60,16 @@ def initialize_database():
             FOREIGN KEY(university_id) REFERENCES universities(id) ON DELETE CASCADE
         )
     """)
-
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS catalog_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            university_name TEXT NOT NULL,
+            department_name TEXT NOT NULL,
+            department_head_name TEXT,
+            department_head_email TEXT,
+            admin_name TEXT,
+            admin_email TEXT
+        )
+    """)
     conn.commit()
     conn.close()

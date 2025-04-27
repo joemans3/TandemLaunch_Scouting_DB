@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -22,3 +24,16 @@ class AdminCreate(BaseModel):
     email: EmailStr
     department_id: int
     university_id: int
+
+
+class CatalogEntryCreate(BaseModel):
+    university_name: str
+    department_name: str
+    department_head_name: Optional[str] = None
+    department_head_email: Optional[str] = None
+    admin_name: Optional[str] = None
+    admin_email: Optional[str] = None
+
+
+class CatalogEntry(CatalogEntryCreate):
+    id: int

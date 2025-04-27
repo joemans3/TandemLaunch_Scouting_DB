@@ -1,11 +1,13 @@
 import sqlite3
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 
 from .database import get_connection, initialize_database
 from .models import (
     AdminCreate,
+    CatalogEntry,
+    CatalogEntryCreate,
     DepartmentCreate,
     DepartmentHeadCreate,
     UniversityCreate,
@@ -14,6 +16,38 @@ from .models import (
 app = FastAPI()
 
 initialize_database()
+
+
+@app.get("/catalog/", response_model=List[CatalogEntry])
+def list_catalog_entries(q: Optional[str] = None, offset: int = 0, limit: int = 100):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if q:
+        cursor.execute(
+            """
+            SELECT * FROM catalog_entries
+            WHERE university_name LIKE ? OR department_name LIKE ?
+            OR department_head_name LIKE ? OR admin_name LIKE ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit, offset),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT * FROM catalog_entries
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
 
 
 @app.get("/ping")
@@ -375,3 +409,138 @@ def search_all(q: Optional[str] = Query(None)):
             unique_results.append(item)
 
     return unique_results
+
+
+@app.post("/catalog/", response_model=CatalogEntry)
+def create_catalog_entry(entry: CatalogEntryCreate):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 🔵 Check for duplicate department head or admin within the same university and department
+    cursor.execute(
+        """
+        SELECT * FROM catalog_entries
+        WHERE university_name = ?
+        AND department_name = ?
+        AND (
+            (department_head_name = ? AND department_head_email = ?)
+            OR
+            (admin_name = ? AND admin_email = ?)
+        )
+        """,
+        (
+            entry.university_name,
+            entry.department_name,
+            entry.department_head_name,
+            entry.department_head_email,
+            entry.admin_name,
+            entry.admin_email,
+        ),
+    )
+    existing = cursor.fetchone()
+
+    if existing:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate department head or admin for this department/university already exists.",
+        )
+
+    # 🔵 Otherwise, insert normally
+    cursor.execute(
+        """
+        INSERT INTO catalog_entries (university_name, department_name,
+            department_head_name, department_head_email,
+            admin_name, admin_email)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entry.university_name,
+            entry.department_name,
+            entry.department_head_name,
+            entry.department_head_email,
+            entry.admin_name,
+            entry.admin_email,
+        ),
+    )
+    conn.commit()
+    entry_id = cursor.lastrowid
+    conn.close()
+
+    return CatalogEntry(id=entry_id, **entry.dict())
+
+
+@app.get("/catalog/", response_model=List[CatalogEntry])
+def list_catalog_entries(q: Optional[str] = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if q:
+        cursor.execute(
+            """
+            SELECT * FROM catalog_entries
+            WHERE university_name LIKE ? OR department_name LIKE ?
+            OR department_head_name LIKE ? OR admin_name LIKE ?
+            LIMIT 100
+            """,
+            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT * FROM catalog_entries
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+# 🔵 Delete a catalog entry by ID
+@app.delete("/catalog/{entry_id}")
+def delete_catalog_entry(entry_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM catalog_entries WHERE id = ?", (entry_id,))
+    conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    conn.close()
+
+    return {"status": "success"}
+
+
+# 🔵 Update a catalog entry (optional for later)
+@app.patch("/catalog/{entry_id}")
+def update_catalog_entry(entry_id: int, entry: CatalogEntryCreate):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE catalog_entries
+        SET university_name = ?, department_name = ?,
+            department_head_name = ?, department_head_email = ?,
+            admin_name = ?, admin_email = ?
+        WHERE id = ?
+        """,
+        (
+            entry.university_name,
+            entry.department_name,
+            entry.department_head_name,
+            entry.department_head_email,
+            entry.admin_name,
+            entry.admin_email,
+            entry_id,
+        ),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    conn.close()
+
+    return {"status": "success"}
