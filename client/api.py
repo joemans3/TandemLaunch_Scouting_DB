@@ -4,8 +4,6 @@ import requests
 import tomli
 from platformdirs import user_config_dir
 
-from .settings import get_server_url
-
 APP_NAME = "scouting-database"
 SETTINGS_FILE = Path(user_config_dir(APP_NAME)) / "settings.toml"
 
@@ -51,7 +49,7 @@ def search_catalog_entries(query: str = "", offset: int = 0, limit: int = 100):
 
 
 def update_catalog_entry(entry_id: int, data: dict):
-    response = requests.post(get_server_url() + "/catalog/", json=data)
+    response = requests.patch(get_base_url() + f"/catalog/{entry_id}", json=data)
     response.raise_for_status()
     return response.json()
 

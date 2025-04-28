@@ -446,13 +446,12 @@ def create_catalog_entry(entry: CatalogEntryCreate):
             detail="Duplicate department head or admin for this department/university already exists.",
         )
 
-    # 🔵 Otherwise, insert normally
     cursor.execute(
         """
         INSERT INTO catalog_entries (university_name, department_name,
             department_head_name, department_head_email,
-            admin_name, admin_email)
-        VALUES (?, ?, ?, ?, ?, ?)
+            admin_name, admin_email, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             entry.university_name,
@@ -461,6 +460,7 @@ def create_catalog_entry(entry: CatalogEntryCreate):
             entry.department_head_email,
             entry.admin_name,
             entry.admin_email,
+            entry.notes,
         ),
     )
     conn.commit()
@@ -525,7 +525,7 @@ def update_catalog_entry(entry_id: int, entry: CatalogEntryCreate):
         UPDATE catalog_entries
         SET university_name = ?, department_name = ?,
             department_head_name = ?, department_head_email = ?,
-            admin_name = ?, admin_email = ?
+            admin_name = ?, admin_email = ?, notes = ?
         WHERE id = ?
         """,
         (
@@ -535,6 +535,7 @@ def update_catalog_entry(entry_id: int, entry: CatalogEntryCreate):
             entry.department_head_email,
             entry.admin_name,
             entry.admin_email,
+            entry.notes,
             entry_id,
         ),
     )

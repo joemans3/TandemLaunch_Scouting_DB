@@ -101,7 +101,7 @@ class ClientApp(QWidget):
 
         # 🔵 Results table
         self.results_table = QTableWidget()
-        self.results_table.setColumnCount(6)
+        self.results_table.setColumnCount(7)
         self.results_table.setHorizontalHeaderLabels(
             [
                 "University",
@@ -110,6 +110,7 @@ class ClientApp(QWidget):
                 "Head Email",
                 "Admin",
                 "Admin Email",
+                "Notes",
             ]
         )
 
@@ -214,6 +215,7 @@ class ClientApp(QWidget):
                 row_data.get("department_head_email", ""),
                 row_data.get("admin_name", ""),
                 row_data.get("admin_email", ""),
+                row_data.get("notes", ""),
             ]
 
             id_fields = {"catalog_entry_id": row_data.get("id")}
@@ -252,6 +254,7 @@ class ClientApp(QWidget):
                         "department_head_email": data.get("head_email") or None,
                         "admin_name": data.get("admin_name") or None,
                         "admin_email": data.get("admin_email") or None,
+                        "notes": data.get("notes") or None,
                     }
                 )
                 QMessageBox.information(self, "Success", "Entry created successfully!")
@@ -330,6 +333,7 @@ class ClientApp(QWidget):
             "department_head_email": self.results_table.item(selected_row, 3).text(),
             "admin_name": self.results_table.item(selected_row, 4).text(),
             "admin_email": self.results_table.item(selected_row, 5).text(),
+            "notes": self.results_table.item(selected_row, 6).text(),
         }
 
         item = self.results_table.item(selected_row, 0)
@@ -363,6 +367,7 @@ class ClientApp(QWidget):
                         or None,
                         "admin_name": new_data.get("admin_name") or None,
                         "admin_email": new_data.get("admin_email") or None,
+                        "notes": new_data.get("notes") or None,
                     },
                 )
                 QMessageBox.information(self, "Updated", "Entry updated successfully.")
@@ -452,6 +457,7 @@ class ClientApp(QWidget):
                         "Head Email",
                         "Admin",
                         "Admin Email",
+                        "Notes",
                     ]
                 )  # header
 
@@ -464,6 +470,7 @@ class ClientApp(QWidget):
                             row.get("department_head_email", ""),
                             row.get("admin_name", ""),
                             row.get("admin_email", ""),
+                            row.get("notes", ""),
                         ]
                     )
 
@@ -491,6 +498,7 @@ class EditEntryDialog(QDialog):
         self.head_email_input = QLineEdit(entry_data.get("department_head_email", ""))
         self.admin_name_input = QLineEdit(entry_data.get("admin_name", ""))
         self.admin_email_input = QLineEdit(entry_data.get("admin_email", ""))
+        self.notes_input = QLineEdit(entry_data.get("notes", ""))
 
         layout.addWidget(QLabel("University Name:"))
         layout.addWidget(self.university_input)
@@ -509,6 +517,9 @@ class EditEntryDialog(QDialog):
 
         layout.addWidget(QLabel("Admin Email:"))
         layout.addWidget(self.admin_email_input)
+
+        layout.addWidget(QLabel("Notes:"))
+        layout.addWidget(self.notes_input)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -528,6 +539,7 @@ class EditEntryDialog(QDialog):
             "department_head_email": self.head_email_input.text().strip(),
             "admin_name": self.admin_name_input.text().strip(),
             "admin_email": self.admin_email_input.text().strip(),
+            "notes": self.notes_input.text().strip(),
         }
 
 
@@ -544,6 +556,7 @@ class NewEntryDialog(QDialog):
         self.head_email_input = QLineEdit()
         self.admin_name_input = QLineEdit()
         self.admin_email_input = QLineEdit()
+        self.notes_input = QLineEdit()
 
         layout.addWidget(QLabel("University Name:"))
         layout.addWidget(self.university_input)
@@ -563,6 +576,9 @@ class NewEntryDialog(QDialog):
         layout.addWidget(QLabel("Admin Email:"))
         layout.addWidget(self.admin_email_input)
 
+        layout.addWidget(QLabel("Notes:"))
+        layout.addWidget(self.notes_input)
+
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -581,4 +597,5 @@ class NewEntryDialog(QDialog):
             "head_email": self.head_email_input.text().strip(),
             "admin_name": self.admin_name_input.text().strip(),
             "admin_email": self.admin_email_input.text().strip(),
+            "notes": self.notes_input.text().strip(),
         }

@@ -33,6 +33,7 @@ class CatalogEntryCreate(BaseModel):
     department_head_email: Optional[str] = None
     admin_name: Optional[str] = None
     admin_email: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class CatalogEntry(CatalogEntryCreate):
