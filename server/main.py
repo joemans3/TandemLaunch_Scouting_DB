@@ -1,53 +1,158 @@
+import csv
+import io
 import sqlite3
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .database import get_connection, initialize_database
+from .external_lookup import lookup_country_by_name, lookup_ror_for_university
 from .models import (
-    AdminCreate,
-    CatalogEntry,
-    CatalogEntryCreate,
-    DepartmentCreate,
-    DepartmentHeadCreate,
-    UniversityCreate,
+    Country,
+    EmailLogOut,
+    EmailThreadLog,
+    PersonCreate,
+    PersonOut,
 )
 
 app = FastAPI()
-
 initialize_database()
 
 
-@app.get("/catalog/", response_model=List[CatalogEntry])
-def list_catalog_entries(q: Optional[str] = None, offset: int = 0, limit: int = 100):
+@app.get("/people/{person_id}/emails/", response_model=List[EmailLogOut])
+def get_person_emails(person_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, timestamp, subject, body, thread_id
+        FROM email_logs
+        WHERE person_id = ?
+        ORDER BY timestamp DESC
+        """,
+        (person_id,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/emails/")
+def ingest_email_thread(log: EmailThreadLog):
     conn = get_connection()
     cursor = conn.cursor()
 
-    if q:
+    cursor.execute("SELECT id, email FROM people")
+    known_people = cursor.fetchall()
+
+    matched = []
+    for row in known_people:
+        if row["email"] in log.participants:
+            matched.append(row["id"])
+
+    if not matched:
+        conn.close()
+        raise HTTPException(status_code=404, detail="No matching people found.")
+
+    for person_id in matched:
         cursor.execute(
             """
-            SELECT * FROM catalog_entries
-            WHERE university_name LIKE ? OR department_name LIKE ?
-            OR department_head_name LIKE ? OR admin_name LIKE ?
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
+            INSERT INTO email_logs (person_id, timestamp, subject, body, thread_id)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit, offset),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT * FROM catalog_entries
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
+            (person_id, log.timestamp, log.subject, log.body, log.thread_id),
         )
 
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "matched": matched}
+
+
+@app.post("/email_logs/")
+def log_email(entry: EmailLogEntry):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    matched_ids = []
+    for email in entry.participants:
+        cursor.execute("SELECT id FROM people WHERE email = ?", (email,))
+        row = cursor.fetchone()
+        if row:
+            matched_ids.append(row["id"])
+
+    for person_id in matched_ids:
+        cursor.execute(
+            """
+            INSERT INTO email_logs (person_id, timestamp, subject, body, thread_id)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (
+                person_id,
+                entry.timestamp,
+                entry.subject,
+                entry.body,
+                entry.thread_id,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+
+    return {"matched_people": matched_ids, "status": "logged"}
+
+
+@app.get("/people/export_csv")
+def export_people_csv():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT p.name, p.email, u.name AS university, c.name AS country,
+               p.subfield, p.subfield_name, p.role, p.notes
+        FROM people p
+        JOIN universities u ON p.university_id = u.id
+        JOIN countries c ON p.country_id = c.id
+        ORDER BY p.id DESC
+    """)
     rows = cursor.fetchall()
     conn.close()
 
-    return [dict(row) for row in rows]
+    # Create CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Name",
+            "Email",
+            "University",
+            "Country",
+            "Subfield",
+            "Subfield Name",
+            "Role",
+            "Notes",
+        ]
+    )
+
+    for row in rows:
+        writer.writerow(
+            [
+                row["name"],
+                row["email"],
+                row["university"],
+                row["country"],
+                row["subfield"],
+                row["subfield_name"],
+                row["role"],
+                row["notes"],
+            ]
+        )
+
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=people_export.csv"},
+    )
 
 
 @app.get("/ping")
@@ -55,493 +160,374 @@ async def ping():
     return {"status": "ok"}
 
 
-@app.delete("/department_heads/{head_id}")
-def delete_department_head(head_id: int):
+@app.post("/people/", response_model=PersonOut)
+def create_person(person: PersonCreate):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM department_heads WHERE id = ?", (head_id,))
-    conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Department head not found.")
-    conn.close()
-    return {"status": "success"}
 
+    # --- Resolve university ---
+    cursor.execute("SELECT id FROM universities WHERE name = ?", (person.university,))
+    row = cursor.fetchone()
+    if row:
+        university_id = row["id"]
+    else:
+        cursor.execute(
+            "SELECT university_id FROM university_aliases WHERE alias = ?",
+            (person.university,),
+        )
+        alias_row = cursor.fetchone()
+        if alias_row:
+            university_id = alias_row["university_id"]
+        else:
+            result = lookup_ror_for_university(person.university)
+            if not result:
+                conn.close()
+                raise HTTPException(
+                    status_code=404, detail="University not found via ROR."
+                )
 
-@app.delete("/admins/{admin_id}")
-def delete_admin(admin_id: int):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM admins WHERE id = ?", (admin_id,))
-    conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Admin not found.")
-    conn.close()
-    return {"status": "success"}
+            canonical_name, ror_id, aliases = result
 
+        try:
+            cursor.execute(
+                "INSERT INTO universities (name, ror_id) VALUES (?, ?)",
+                (canonical_name, ror_id),
+            )
+            university_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Already exists — get its ID
+            cursor.execute("SELECT id FROM universities WHERE ror_id = ?", (ror_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to retrieve existing university after conflict.",
+                )
+            university_id = row["id"]
 
-@app.post("/universities/")
-def create_university(university: UniversityCreate):
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO universities (name) VALUES (?)", (university.name,))
+            conn.commit()
+
+    # --- Resolve country ---
+    cursor.execute("SELECT id FROM countries WHERE name = ?", (person.country,))
+    row = cursor.fetchone()
+    if row:
+        country_id = row["id"]
+    else:
+        result = lookup_country_by_name(person.country)
+        if not result:
+            conn.close()
+            raise HTTPException(
+                status_code=404, detail="Country not found via ISO lookup."
+            )
+        canonical_name, code = result
+        try:
+            cursor.execute(
+                "INSERT INTO countries (name, code) VALUES (?, ?)",
+                (canonical_name, code),
+            )
+            country_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Already exists — get ID by code
+            cursor.execute("SELECT id FROM countries WHERE code = ?", (code,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to retrieve existing country after conflict.",
+                )
+            country_id = row["id"]
         conn.commit()
-        university_id = cursor.lastrowid
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="University already exists.")
-    finally:
-        conn.close()
 
-    return {"id": university_id, "name": university.name}
+    # --- Insert person ---
+    try:
+        cursor.execute(
+            """
+            INSERT INTO people (
+                name, email, university_id, country_id,
+                subfield, subfield_name, role, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                person.name,
+                person.email,
+                university_id,
+                country_id,
+                person.subfield,
+                person.subfield_name,
+                person.role,
+                person.notes,
+            ),
+        )
+        conn.commit()
+        person_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already exists.")
+
+    conn.close()
+    return PersonOut(
+        id=person_id,
+        university_id=university_id,
+        country_id=country_id,
+        **person.dict(),
+    )
+
+
+@app.delete("/people/{person_id}")
+def delete_person(person_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Check existence
+    cursor.execute("SELECT * FROM people WHERE id = ?", (person_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Person not found.")
+
+    # Perform deletion
+    cursor.execute("DELETE FROM people WHERE id = ?", (person_id,))
+    conn.commit()
+    conn.close()
+
+    return {"status": "success", "message": f"Person {person_id} deleted."}
+
+
+@app.patch("/people/{person_id}", response_model=PersonOut)
+def update_person(person_id: int, person: PersonCreate):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # --- Resolve university ---
+    cursor.execute("SELECT id FROM universities WHERE name = ?", (person.university,))
+    row = cursor.fetchone()
+    if row:
+        university_id = row["id"]
+    else:
+        cursor.execute(
+            "SELECT university_id FROM university_aliases WHERE alias = ?",
+            (person.university,),
+        )
+        alias_row = cursor.fetchone()
+        if alias_row:
+            university_id = alias_row["university_id"]
+        else:
+            result = lookup_ror_for_university(person.university)
+            if not result:
+                conn.close()
+                raise HTTPException(
+                    status_code=404, detail="University not found via ROR."
+                )
+            canonical_name, ror_id, aliases = result
+        try:
+            cursor.execute(
+                "INSERT INTO universities (name, ror_id) VALUES (?, ?)",
+                (canonical_name, ror_id),
+            )
+            university_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Already exists — get its ID
+            cursor.execute("SELECT id FROM universities WHERE ror_id = ?", (ror_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to retrieve existing university after conflict.",
+                )
+            university_id = row["id"]
+            conn.commit()
+
+    # --- Resolve country ---
+    cursor.execute("SELECT id FROM countries WHERE name = ?", (person.country,))
+    row = cursor.fetchone()
+    if row:
+        country_id = row["id"]
+    else:
+        result = lookup_country_by_name(person.country)
+        if not result:
+            conn.close()
+            raise HTTPException(
+                status_code=404, detail="Country not found via ISO lookup."
+            )
+        canonical_name, code = result
+        try:
+            cursor.execute(
+                "INSERT INTO countries (name, code) VALUES (?, ?)",
+                (canonical_name, code),
+            )
+            country_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Already exists — get ID by code
+            cursor.execute("SELECT id FROM countries WHERE code = ?", (code,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to retrieve existing country after conflict.",
+                )
+            country_id = row["id"]
+        conn.commit()
+
+    # --- Ensure person exists ---
+    cursor.execute("SELECT * FROM people WHERE id = ?", (person_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Person not found.")
+
+    # --- Perform update ---
+    try:
+        cursor.execute(
+            """
+            UPDATE people SET
+                name = ?, email = ?, university_id = ?, country_id = ?,
+                subfield = ?, subfield_name = ?, role = ?, notes = ?
+            WHERE id = ?
+        """,
+            (
+                person.name,
+                person.email,
+                university_id,
+                country_id,
+                person.subfield,
+                person.subfield_name,
+                person.role,
+                person.notes,
+                person_id,
+            ),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="Update failed. No matching person or invalid university/country reference.",
+            )
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already exists.")
+
+    conn.close()
+    return PersonOut(
+        id=person_id,
+        university_id=university_id,
+        country_id=country_id,
+        **person.dict(),
+    )
+
+
+@app.get("/people/", response_model=List[PersonOut])
+def list_people(
+    role: Optional[str] = None,
+    country: Optional[str] = None,
+    subfield: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT p.*, u.name AS university, c.name AS country
+        FROM people p
+        JOIN universities u ON p.university_id = u.id
+        JOIN countries c ON p.country_id = c.id
+    """
+    filters = []
+    params = []
+
+    # Optional filters
+    if role:
+        filters.append("p.role = ?")
+        params.append(role)
+    if country:
+        filters.append("c.name = ?")
+        params.append(country)
+    if subfield:
+        filters.append("p.subfield = ?")
+        params.append(subfield)
+    if q:
+        filters.append("""
+            (
+                p.name LIKE ?
+                OR p.email LIKE ?
+                OR u.name LIKE ?
+                OR c.name LIKE ?
+            )
+        """)
+        params.extend([f"%{q}%"] * 4)
+
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+
+    query += " ORDER BY p.id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        PersonOut(
+            id=row["id"],
+            name=row["name"],
+            email=row["email"],
+            university=row["university"],
+            country=row["country"],
+            university_id=row["university_id"],
+            country_id=row["country_id"],
+            subfield=row["subfield"],
+            subfield_name=row["subfield_name"],
+            role=row["role"],
+            notes=row["notes"],
+        )
+        for row in rows
+    ]
 
 
 @app.get("/universities/")
-def list_universities():
+def list_universities(limit: int = 1000):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM universities")
+    cursor.execute("SELECT * FROM universities ORDER BY name LIMIT ?", (limit,))
     rows = cursor.fetchall()
     conn.close()
-
     return [dict(row) for row in rows]
 
 
-# 🔵 New: Create Department
-@app.post("/departments/")
-def create_department(department: DepartmentCreate):
+@app.post("/universities/aliases/")
+def create_university_alias(alias: str, canonical_name: str):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # check if university exists
-    cursor.execute(
-        "SELECT * FROM universities WHERE id = ?", (department.university_id,)
-    )
-    university = cursor.fetchone()
-    if not university:
-        raise HTTPException(status_code=404, detail="University not found.")
-
-    cursor.execute(
-        "INSERT INTO departments (name, university_id) VALUES (?, ?)",
-        (department.name, department.university_id),
-    )
-    conn.commit()
-    department_id = cursor.lastrowid
-    conn.close()
-
-    return {
-        "id": department_id,
-        "name": department.name,
-        "university_id": department.university_id,
-    }
-
-
-# 🔵 New: List Departments
-@app.get("/departments/")
-def list_departments():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT departments.id, departments.name, universities.name AS university_name
-        FROM departments
-        JOIN universities ON departments.university_id = universities.id
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
-
-
-@app.post("/department_heads/")
-def create_department_head(head: DepartmentHeadCreate):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # check if university exists
-    cursor.execute("SELECT * FROM universities WHERE id = ?", (head.university_id,))
-    university = cursor.fetchone()
-    if not university:
-        raise HTTPException(status_code=404, detail="University not found.")
-
-    # check if department exists
-    cursor.execute(
-        "SELECT * FROM departments WHERE id = ? AND university_id = ?",
-        (head.department_id, head.university_id),
-    )
-    department = cursor.fetchone()
-    if not department:
-        raise HTTPException(
-            status_code=404, detail="Department not found for given university."
-        )
-
-    cursor.execute(
-        "INSERT INTO department_heads (name, email, department_id, university_id) VALUES (?, ?, ?, ?)",
-        (head.name, head.email, head.department_id, head.university_id),
-    )
-    conn.commit()
-    head_id = cursor.lastrowid
-    conn.close()
-
-    return {
-        "id": head_id,
-        "name": head.name,
-        "email": head.email,
-        "department_id": head.department_id,
-        "university_id": head.university_id,
-    }
-
-
-# --- New: List Department Heads ---
-@app.get("/department_heads/")
-def list_department_heads():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT department_heads.id, department_heads.name, department_heads.email,
-               departments.name AS department_name,
-               universities.name AS university_name
-        FROM department_heads
-        JOIN departments ON department_heads.department_id = departments.id
-        JOIN universities ON department_heads.university_id = universities.id
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
-
-
-@app.post("/admins/")
-def create_admin(admin: AdminCreate):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # check if university exists
-    cursor.execute("SELECT * FROM universities WHERE id = ?", (admin.university_id,))
-    university = cursor.fetchone()
-    if not university:
-        raise HTTPException(status_code=404, detail="University not found.")
-
-    # check if department exists
-    cursor.execute(
-        "SELECT * FROM departments WHERE id = ? AND university_id = ?",
-        (admin.department_id, admin.university_id),
-    )
-    department = cursor.fetchone()
-    if not department:
-        raise HTTPException(
-            status_code=404, detail="Department not found for given university."
-        )
-
-    cursor.execute(
-        "INSERT INTO admins (name, email, department_id, university_id) VALUES (?, ?, ?, ?)",
-        (admin.name, admin.email, admin.department_id, admin.university_id),
-    )
-    conn.commit()
-    admin_id = cursor.lastrowid
-    conn.close()
-
-    return {
-        "id": admin_id,
-        "name": admin.name,
-        "email": admin.email,
-        "department_id": admin.department_id,
-        "university_id": admin.university_id,
-    }
-
-
-# --- New: List Admins ---
-@app.get("/admins/")
-def list_admins():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT admins.id, admins.name, admins.email,
-               departments.name AS department_name,
-               universities.name AS university_name
-        FROM admins
-        JOIN departments ON admins.department_id = departments.id
-        JOIN universities ON admins.university_id = universities.id
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
-
-
-# --- New: Search ---
-@app.get("/search/")
-def search_all(q: Optional[str] = Query(None)):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    results = []
-
-    if not q:
-        # 🔵 If no search query, return top 100 most recent entries
-        cursor.execute("""
-            SELECT universities.id AS university_id,
-                   universities.name AS university_name,
-                   departments.id AS department_id,
-                   departments.name AS department_name,
-                   department_heads.id AS department_head_id,
-                   department_heads.name AS department_head_name,
-                   department_heads.email AS department_head_email,
-                   admins.id AS admin_id,
-                   admins.name AS admin_name,
-                   admins.email AS admin_email
-            FROM departments
-            JOIN universities ON departments.university_id = universities.id
-            LEFT JOIN department_heads ON department_heads.department_id = departments.id
-            LEFT JOIN admins ON admins.department_id = departments.id
-            ORDER BY departments.id DESC
-            LIMIT 100
-        """)
-        rows = cursor.fetchall()
+    cursor.execute("SELECT id FROM universities WHERE name = ?", (canonical_name,))
+    row = cursor.fetchone()
+    if not row:
         conn.close()
-        return [dict(row) for row in rows]
+        raise HTTPException(status_code=404, detail="Canonical university not found.")
 
-    # 🔵 Otherwise, perform the full search based on query
-    results = []
-    # 🔵 Search by University name
-    cursor.execute(
-        """
-        SELECT universities.id AS university_id,
-               universities.name AS university_name,
-               departments.id AS department_id,
-               departments.name AS department_name,
-               department_heads.id AS department_head_id,
-               department_heads.name AS department_head_name,
-               department_heads.email AS department_head_email,
-               admins.id AS admin_id,
-               admins.name AS admin_name,
-               admins.email AS admin_email
-        FROM universities
-        LEFT JOIN departments ON departments.university_id = universities.id
-        LEFT JOIN department_heads ON department_heads.department_id = departments.id
-        LEFT JOIN admins ON admins.department_id = departments.id
-        WHERE universities.name LIKE ?
-    """,
-        (f"%{q}%",),
-    )
-    rows = cursor.fetchall()
-    results.extend([dict(row) for row in rows])
-
-    # 🔵 Search by Department name
-    cursor.execute(
-        """
-        SELECT universities.id AS university_id,
-               universities.name AS university_name,
-               departments.id AS department_id,
-               departments.name AS department_name,
-               department_heads.id AS department_head_id,
-               department_heads.name AS department_head_name,
-               department_heads.email AS department_head_email,
-               admins.id AS admin_id,
-               admins.name AS admin_name,
-               admins.email AS admin_email
-        FROM departments
-        JOIN universities ON departments.university_id = universities.id
-        LEFT JOIN department_heads ON department_heads.department_id = departments.id
-        LEFT JOIN admins ON admins.department_id = departments.id
-        WHERE departments.name LIKE ?
-    """,
-        (f"%{q}%",),
-    )
-    rows = cursor.fetchall()
-    results.extend([dict(row) for row in rows])
-
-    # 🔵 Search by Department Head name
-    cursor.execute(
-        """
-        SELECT universities.id AS university_id,
-               universities.name AS university_name,
-               departments.id AS department_id,
-               departments.name AS department_name,
-               department_heads.id AS department_head_id,
-               department_heads.name AS department_head_name,
-               department_heads.email AS department_head_email,
-               admins.id AS admin_id,
-               admins.name AS admin_name,
-               admins.email AS admin_email
-        FROM department_heads
-        JOIN departments ON department_heads.department_id = departments.id
-        JOIN universities ON department_heads.university_id = universities.id
-        LEFT JOIN admins ON admins.department_id = departments.id
-        WHERE department_heads.name LIKE ?
-    """,
-        (f"%{q}%",),
-    )
-    rows = cursor.fetchall()
-    results.extend([dict(row) for row in rows])
-
-    # 🔵 Search by Admin name
-    cursor.execute(
-        """
-        SELECT universities.id AS university_id,
-               universities.name AS university_name,
-               departments.id AS department_id,
-               departments.name AS department_name,
-               department_heads.id AS department_head_id,
-               department_heads.name AS department_head_name,
-               department_heads.email AS department_head_email,
-               admins.id AS admin_id,
-               admins.name AS admin_name,
-               admins.email AS admin_email
-        FROM admins
-        JOIN departments ON admins.department_id = departments.id
-        JOIN universities ON admins.university_id = universities.id
-        LEFT JOIN department_heads ON department_heads.department_id = departments.id
-        WHERE admins.name LIKE ?
-    """,
-        (f"%{q}%",),
-    )
-    rows = cursor.fetchall()
-    results.extend([dict(row) for row in rows])
-
-    conn.close()
-
-    # 🔵 Remove duplicates (since multiple queries might hit same entry)
-    unique_results = []
-    seen = set()
-    for item in results:
-        key = tuple(item.items())
-        if key not in seen:
-            seen.add(key)
-            unique_results.append(item)
-
-    return unique_results
-
-
-@app.post("/catalog/", response_model=CatalogEntry)
-def create_catalog_entry(entry: CatalogEntryCreate):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # 🔵 Check for duplicate department head or admin within the same university and department
-    cursor.execute(
-        """
-        SELECT * FROM catalog_entries
-        WHERE university_name = ?
-        AND department_name = ?
-        AND (
-            (department_head_name = ? AND department_head_email = ?)
-            OR
-            (admin_name = ? AND admin_email = ?)
+    try:
+        cursor.execute(
+            "INSERT INTO university_aliases (alias, university_id) VALUES (?, ?)",
+            (alias, row["id"]),
         )
-        """,
-        (
-            entry.university_name,
-            entry.department_name,
-            entry.department_head_name,
-            entry.department_head_email,
-            entry.admin_name,
-            entry.admin_email,
-        ),
-    )
-    existing = cursor.fetchone()
-
-    if existing:
+        conn.commit()
+    except sqlite3.IntegrityError:
         conn.close()
-        raise HTTPException(
-            status_code=400,
-            detail="Duplicate department head or admin for this department/university already exists.",
-        )
+        raise HTTPException(status_code=400, detail="Alias already exists.")
 
-    cursor.execute(
-        """
-        INSERT INTO catalog_entries (university_name, department_name,
-            department_head_name, department_head_email,
-            admin_name, admin_email, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            entry.university_name,
-            entry.department_name,
-            entry.department_head_name,
-            entry.department_head_email,
-            entry.admin_name,
-            entry.admin_email,
-            entry.notes,
-        ),
-    )
-    conn.commit()
-    entry_id = cursor.lastrowid
     conn.close()
+    return {"alias": alias, "university_id": row["id"]}
 
-    return CatalogEntry(id=entry_id, **entry.dict())
 
-
-@app.get("/catalog/", response_model=List[CatalogEntry])
-def list_catalog_entries(q: Optional[str] = None):
+@app.get("/countries/", response_model=List[Country])
+def list_countries():
     conn = get_connection()
     cursor = conn.cursor()
-
-    if q:
-        cursor.execute(
-            """
-            SELECT * FROM catalog_entries
-            WHERE university_name LIKE ? OR department_name LIKE ?
-            OR department_head_name LIKE ? OR admin_name LIKE ?
-            LIMIT 100
-            """,
-            (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT * FROM catalog_entries
-            ORDER BY id DESC
-            LIMIT 100
-            """
-        )
-
+    cursor.execute("SELECT * FROM countries ORDER BY name")
     rows = cursor.fetchall()
     conn.close()
-
     return [dict(row) for row in rows]
-
-
-# 🔵 Delete a catalog entry by ID
-@app.delete("/catalog/{entry_id}")
-def delete_catalog_entry(entry_id: int):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM catalog_entries WHERE id = ?", (entry_id,))
-    conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Entry not found.")
-    conn.close()
-
-    return {"status": "success"}
-
-
-# 🔵 Update a catalog entry (optional for later)
-@app.patch("/catalog/{entry_id}")
-def update_catalog_entry(entry_id: int, entry: CatalogEntryCreate):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        UPDATE catalog_entries
-        SET university_name = ?, department_name = ?,
-            department_head_name = ?, department_head_email = ?,
-            admin_name = ?, admin_email = ?, notes = ?
-        WHERE id = ?
-        """,
-        (
-            entry.university_name,
-            entry.department_name,
-            entry.department_head_name,
-            entry.department_head_email,
-            entry.admin_name,
-            entry.admin_email,
-            entry.notes,
-            entry_id,
-        ),
-    )
-    conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Entry not found.")
-    conn.close()
-
-    return {"status": "success"}

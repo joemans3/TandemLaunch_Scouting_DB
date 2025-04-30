@@ -2,10 +2,9 @@ from pathlib import Path
 
 import tomli
 import tomli_w
-from platformdirs import user_config_dir
 
 APP_NAME = "scouting-database"
-SETTINGS_FILE = Path(user_config_dir(APP_NAME)) / "settings.toml"
+SETTINGS_FILE = Path.home() / APP_NAME / "settings.toml"
 
 DEFAULT_SETTINGS = {
     "server": {
@@ -18,8 +17,14 @@ DEFAULT_SETTINGS = {
 def load_settings() -> dict:
     if not SETTINGS_FILE.exists():
         save_settings(DEFAULT_SETTINGS)
+        return DEFAULT_SETTINGS.copy()
+
     with open(SETTINGS_FILE, "rb") as f:
-        return tomli.load(f)
+        loaded = tomli.load(f)
+    settings = DEFAULT_SETTINGS.copy()
+    settings.update(loaded)
+    settings["server"].update(loaded.get("server", {}))
+    return settings
 
 
 def save_settings(settings: dict):

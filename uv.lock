@@ -153,6 +153,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pycountry"
+version = "24.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/57/c389fa68c50590881a75b7883eeb3dc15e9e73a0fdc001cdd45c13290c92/pycountry-24.6.1.tar.gz", hash = "sha256:b61b3faccea67f87d10c1f2b0fc0be714409e8fcdcc1315613174f6466c10221", size = 6043910 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/ec/1fb891d8a2660716aadb2143235481d15ed1cbfe3ad669194690b0604492/pycountry-24.6.1-py3-none-any.whl", hash = "sha256:f1a4fb391cd7214f8eefd39556d740adcc233c778a27f8942c8dca351d6ce06f", size = 6335189 },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.11.3"
 source = { registry = "https://pypi.org/simple" }
@@ -300,10 +309,11 @@ wheels = [
 
 [[package]]
 name = "tlscouting"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "platformdirs" },
+    { name = "pycountry" },
     { name = "pyqt6" },
     { name = "requests" },
     { name = "tomli" },
@@ -321,6 +331,7 @@ server = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115.0" },
     { name = "platformdirs", specifier = ">=4.3.7" },
+    { name = "pycountry", specifier = ">=24.6.1" },
     { name = "pydantic", extras = ["email"], marker = "extra == 'server'", specifier = ">=2.11.0" },
     { name = "pyqt6", specifier = ">=6.9.0" },
     { name = "requests", specifier = ">=2.32.3" },
